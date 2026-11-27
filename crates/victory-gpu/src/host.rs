@@ -658,6 +658,9 @@ fn reaper_on() -> bool {
 static REAP: (Mutex<Vec<Vec<(u64, Retired)>>>, std::sync::Condvar) = (Mutex::new(Vec::new()), std::sync::Condvar::new());
 static REAPER: OnceLock<bool> = OnceLock::new();
 
+/// Limit objects waiting for the worker, including the batch it is dropping.
+const REAP_LIMIT: u64 = 16_384;
+
 /// Objects [`reaper`] dropped since the start, the microseconds that took,
 /// and the objects handed to it and not dropped yet.
 static REAPED: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
@@ -670,11 +673,18 @@ fn reap(objects: Vec<(u64, Retired)>, aside: bool) {
     }
     let started =
         aside && *REAPER.get_or_init(|| std::thread::Builder::new().name("victory-reaper".into()).spawn(reaper).is_ok());
-    if !started {
+    let count = objects.len() as u64;
+    // Keep the original synchronous release when the worker has no room.
+    if !started
+        || REAPED[2]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+                pending.checked_add(count).filter(|&next| next <= REAP_LIMIT)
+            })
+            .is_err()
+    {
         drop(objects);
         return;
     }
-    REAPED[2].fetch_add(objects.len() as u64, Ordering::Relaxed);
     REAP.0.lock().unwrap_or_else(|e| e.into_inner()).push(objects);
     REAP.1.notify_one();
 }
@@ -712,7 +722,7 @@ fn reaper() {
 
 #[cfg(test)]
 mod reaper_tests {
-    use super::{Retired, reap};
+    use super::{REAP_LIMIT, Retired, reap};
     use std::sync::mpsc;
 
     /// Says on which thread it was dropped.
@@ -736,6 +746,17 @@ mod reaper_tests {
         reap(objects(5, &tell), false);
         let dropped: Vec<Option<String>> = told.try_iter().collect();
         assert_eq!(dropped, vec![here; 5]);
+    }
+
+    #[test]
+    fn batches_larger_than_the_backlog_limit_release_on_the_caller() {
+        let (tell, told) = mpsc::channel();
+        let here = std::thread::current().name().map(str::to_string);
+        let count = REAP_LIMIT as usize + 1;
+        reap(objects(count, &tell), true);
+        let dropped: Vec<_> = told.try_iter().collect();
+        assert_eq!(dropped.len(), count);
+        assert!(dropped.iter().all(|name| name == &here));
     }
 
     /// With it every object is dropped, once, by the thread of that name,
