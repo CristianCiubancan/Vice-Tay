@@ -46,6 +46,7 @@ mod tls;
 pub mod write_sites;
 #[cfg(windows)]
 mod windows;
+pub mod working_set;
 
 #[cfg(windows)]
 pub use crash::{

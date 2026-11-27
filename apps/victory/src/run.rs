@@ -193,10 +193,11 @@ pub fn run(
             println!("renderer port 2: {copies} of {} table copies of the title patched", done.len());
         }
     }
-    // The title's heartbeat for the RAM throttle's waits (VICTORY_RAM_KEEP_ALIVE,
-    // off without it; checked against the build's code).
+    // Apply the optional working set limit before the title allocates memory.
     #[cfg(windows)]
     if execute {
+        victory_loader::working_set::apply_asked();
+        // The optional RAM throttle checks the heartbeat address against the build.
         let size = image.info().size_of_image as usize;
         // SAFETY: the image stays mapped for the run.
         if let Some(flag) = unsafe { victory_loader::heartbeat::asked(image.base(), size) } {
